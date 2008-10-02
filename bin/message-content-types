@@ -1,0 +1,19 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use lib 'lib';
+use MIME::Structure;
+
+my $parser = MIME::Structure->new;
+
+foreach my $f (@ARGV) {
+    open my $fh, '<', $f or die "Can't open file $f: $!";
+    $parser->parse($fh);
+    my $concise = $parser->concise_structure;
+    while ( $concise =~ m{\(([^:]+)}g ) {
+        print $1, "\n";
+    }
+    close $fh;
+}
+

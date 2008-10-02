@@ -1,0 +1,12 @@
+bin/message-content-types
+lib/MIME/Structure.pm
+Makefile.PL
+MANIFEST.SKIP
+META.yml
+t/00-use.t
+t/01-parse.t
+t/98-pod-coverage.t
+t/99-pod.t
+t/messages/nested.txt
+t/messages/one-level.txt
+t/messages/simple.txt
