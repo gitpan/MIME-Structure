@@ -1,7 +1,7 @@
 --- #YAML:1.0
 name:               MIME-Structure
-version:            0.04
-abstract:           determine structure of MIME messages
+version:            0.05
+abstract:           ~
 author:
     - Paul Hoffman <nkuitse AT cpan DOT org>
 license:            unknown

@@ -1,6 +1,7 @@
 bin/message-content-types
 lib/MIME/Structure.pm
 Makefile.PL
+MANIFEST
 MANIFEST.SKIP
 META.yml
 t/00-use.t

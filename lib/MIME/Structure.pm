@@ -4,7 +4,7 @@ use strict;
 
 use vars qw($VERSION);
 
-$VERSION = '0.04';
+$VERSION = '0.05';
 
 use Text::Balanced qw(extract_delimited);
 
@@ -12,11 +12,8 @@ use constant IN_HEADER   => 1;
 use constant IN_BODY     => 2;
 use constant IN_PREAMBLE => 3;
 use constant IN_EPILOGUE => 4;
-#use constant IN_FROM_LINE   => 5;
-#use constant EXPECTING_FROM_LINE => 6;
 
 use constant PRINT_NONE      => 0;
-#use constant PRINT_FROM_LINE => 1;
 use constant PRINT_HEADER    => 2;
 use constant PRINT_BODY      => 4;
 use constant PRINT_PREAMBLE  => 8;
@@ -28,8 +25,6 @@ sub new {
     my $self = bless {
         'keep_header'    => 1,
         'unfold_header'  => 1,
-#        'require_From_line' => 0,
-#        'print_From_line'   => 0,
         'print_header'   => 0,
         'print_body'     => 0,
         'print_preamble' => 0,
@@ -40,7 +35,6 @@ sub new {
 
 sub root { @_ > 1 ? $_[0]->{'root'} = $_[1] : $_[0]->{'root'} }
 sub keep_header { @_ > 1 ? $_[0]->{'keep_header'} = $_[1] : $_[0]->{'keep_header'} }
-#sub require_From_line { @_ > 1 ? $_[0]->{'require_From_line'} = $_[1] : $_[0]->{'require_From_line'} }
 sub print { @_ > 1 ? $_[0]->{'print'} = $_[1] : $_[0]->{'print'} }
 sub print_header { @_ > 1 ? $_[0]->{'print_header'} = $_[1] : $_[0]->{'print_header'} }
 sub print_body { @_ > 1 ? $_[0]->{'print_body'} = $_[1] : $_[0]->{'print_body'} }
@@ -110,32 +104,21 @@ sub parse {
     my @context = ($root);
     my @boundaries;
     my $header = '';
+
     # --- Parsing options
     my $unfold_header  = $self->unfold_header;
     my $keep_header       = $self->keep_header;
-#   my $require_From_line = $self->require_From_line;
     my $print             = $self->print;
-#   my $print_From_line   = $print & PRINT_FROM_LINE;
     my $print_header      = $print & PRINT_HEADER;
     my $print_body        = $print & PRINT_BODY;
     my $print_preamble    = $print & PRINT_PREAMBLE;
     my $print_epilogue    = $print & PRINT_EPILOGUE;
-#   my $state = $require_From_line ? EXPECTING_FROM_LINE : IN_HEADER;
+
     my $state = IN_HEADER;
     while (<$fh>) {
-#       if ($ofs == $start_ofs) {
-#           if ($require_From_line) {
-#               die unless /^From /;
-#           }
-#           $state = IN_FROM_LINE;
-#       }
         my $len = length $_;
         $ofs += $len;
         $line++;
-#       if ($state == IN_FROM_LINE) {
-#           next;
-#       }
-#       elsif ($state == IN_HEADER) {
         if ($state == IN_HEADER) {
             print if $print_header;
             if (/^$/) {
@@ -218,10 +201,6 @@ sub parse {
             # A line within the preamble: ignore per RFC 2049
             print if $print_preamble;
         }
-#       elsif ($state == IN_FROM_LINE) {
-#           # The From_ line        
-#           print if $print_From_line;
-#       }
         elsif ($state == IN_EPILOGUE) {
             # A line within the epilogue: ignore per RFC 2049
             print if $print_epilogue;
@@ -231,7 +210,7 @@ sub parse {
             print if $print_body;
         }
     }
-    return $root;
+    return $self;
 }
 
 sub parse_header {
@@ -313,7 +292,7 @@ sub concise_structure {
 test() unless caller();
 
 sub test {
-    my $parser = __PACKAGE__->new;
+    my $parser = __PACKAGE__->new('keep_header' => 0);
     $parser->parse(\*STDIN);
     print $parser->concise_structure, "\n";
 }
@@ -321,6 +300,7 @@ sub test {
 
 1;
 
+=pod
 
 =head1 NAME
 
@@ -355,11 +335,12 @@ MIME::Structure - determine structure of MIME messages
 =item B<parse>
 
     $root = $parser->parse;
+    $root = $parser->parse($cur_offset, $cur_line);
 
 =item B<root>
 
     $parser->parse;
-    $root = $parser->parse;
+    $root = $parser->root;
 
 =item B<keep_header>
 
@@ -387,9 +368,13 @@ following symbolic constants, ORed together:
 =over 4
 
 =item B<PRINT_NONE>
+
 =item B<PRINT_HEADER>
+
 =item B<PRINT_BODY>
+
 =item B<PRINT_PREAMBLE>
+
 =item B<PRINT_EPILOGUE>
 
 =back
@@ -399,9 +384,13 @@ Or using the following string constants concatenated using any delimiter:
 =over 4
 
 =item B<none>
+
 =item B<header>
+
 =item B<body>
+
 =item B<preamble>
+
 =item B<epilogue>
 
 =back
@@ -436,72 +425,39 @@ Set (or get) whether epilogues should be printed.
 
 =item B<concise_structure>
 
-    $root = $parser->parse;
+    $parser->parse;
     print $parser->concise_structure;
     # e.g., '(multipart/alternative:0 (text/html:291) (text/plain:9044))'
 
+Returns a string showing the structure of a message, including the content
+type and offset of each entity (i.e., the message and [if it's multipart] all
+of its parts, recursively).  Each entity is printed in the form:
+
+    "(" content-type ":" byte-offset [ " " parts... ")"
+
+Offsets are B<byte> offsets of the entity's header from the beginning of the
+message.  (If B<parse()> was called with an I<offset> parameter, this is added
+to the offset of the entity's header.)
+
+N.B.: The first offset is always 0.
+
 =back
 
-__END__
-{
-    # Copied (with minuscule changes) from Email::MIME::ContentType
-    my $tspecials = quotemeta '()<>@,;:\\"/[]?=';
-    my $ct_default = 'text/plain; charset=us-ascii';
-    my $extract_quoted = 
-        qr/(?:\"(?:[^\\\"]*(?:\\.[^\\\"]*)*)\"|\'(?:[^\\\']*(?:\\.[^\\\']*)*)\')/;
-    my $type    = qr/[^$tspecials]+/;
-    my $subtype = qr/[^$tspecials]+/;
-    my $params  = qr/;.*/;
-    
-    sub parse_content_type { # XXX This does not take note of RFC2822 comments
-        my $ct = shift;
-    
-        # If the header isn't there or is empty, give default answer.
-        return parse_content_type($ct_default) unless defined $ct and length $ct;
-    
-        # It is also recommend (sic.) that this default be assumed when a
-        # syntactically invalid Content-Type header field is encountered.
-        return parse_content_type($ct_default)
-            unless $ct =~ m{^($type)/($subtype)\s*($params)?$};
-        return (lc $1, lc $2, _parse_attributes($3));
-    }
-    
-    sub _parse_attributes {
-        local $_ = shift;
-        my $attribs = {};
-        while ($_) {
-            s/^;//;
-            s/^\s+// and next;
-            s/\s+$//;
-            unless (s/^([^$tspecials]+)=//) {
-              # We check for $_'s truth because some mail software generates a
-              # Content-Type like this: "Content-Type: text/plain;"
-              # RFC 1521 section 3 says a parameter must exist if there is a
-              # semicolon.
-              carp "Illegal Content-Type parameter $_" if $STRICT_PARAMS or $_;
-              return $attribs;
-            }
-            my $attribute = lc $1;
-            my $value = _extract_ct_attribute_value();
-            $attribs->{$attribute} = $value;
-        }
-        return $attribs;
-    }
-    
-    sub _extract_ct_attribute_value { # EXPECTS AND MODIFIES $_
-        my $value;
-        while (length $_) { 
-            s/^([^$tspecials]+)// and $value .= $1;
-            s/^($extract_quoted)// and do {
-                my $sub = $1; $sub =~ s/^["']//; $sub =~ s/["']$//;
-                $value .= $sub;
-            };
-            /^;/ and last;
-            /^([$tspecials])/ and do { 
-                carp "Unquoted $1 not allowed in Content-Type!"; 
-                return;
-            }
-        }
-        return $value;
-    }
-}
+=head1 BUGS
+
+Documentation is sketchy.
+
+=head1 AUTHOR
+
+Paul Hoffman E<lt>nkuitse (at) cpan (dot) orgE<gt>
+
+=head1 COPYRIGHT
+
+Copyright 2008 Paul M. Hoffman. All rights reserved.
+
+This program is free software; you can redistribute it
+and modify it under the same terms as Perl itself. 
+
+=cut
+
+
