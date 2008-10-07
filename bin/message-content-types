@@ -9,9 +9,9 @@ my $parser = MIME::Structure->new;
 
 foreach my $f (@ARGV) {
     open my $fh, '<', $f or die "Can't open file $f: $!";
-    $parser->parse($fh);
-    my $concise = $parser->concise_structure;
-    while ( $concise =~ m{\(([^:]+)}g ) {
+    my ($message) = $parser->parse($fh);
+    my $concise = $parser->concise_structure($message);
+    while ( $concise =~ m{\([\d.]+ ([^:]+)}g ) {
         print $1, "\n";
     }
     close $fh;

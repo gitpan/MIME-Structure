@@ -1,9 +1,11 @@
 bin/message-content-types
+CHANGES
 lib/MIME/Structure.pm
 Makefile.PL
 MANIFEST
 MANIFEST.SKIP
 META.yml
+README
 t/00-use.t
 t/01-parse.t
 t/98-pod-coverage.t

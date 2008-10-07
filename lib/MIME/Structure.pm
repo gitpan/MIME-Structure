@@ -4,7 +4,7 @@ use strict;
 
 use vars qw($VERSION);
 
-$VERSION = '0.05';
+$VERSION = '0.06';
 
 use Text::Balanced qw(extract_delimited);
 
@@ -14,41 +14,34 @@ use constant IN_PREAMBLE => 3;
 use constant IN_EPILOGUE => 4;
 
 use constant PRINT_NONE      => 0;
-use constant PRINT_HEADER    => 2;
+use constant PRINT_HEADER    => 1;
+use constant PRINT_PREAMBLE  => 2;
 use constant PRINT_BODY      => 4;
-use constant PRINT_PREAMBLE  => 8;
-use constant PRINT_EPILOGUE  => 16;
-use constant PRINT_NOT_SPECIFIED => 2**15;
+use constant PRINT_EPILOGUE  => 8;
+
+# --- Constructor, accessors, initializer
 
 sub new {
     my $cls = shift;
     my $self = bless {
-        'keep_header'    => 1,
-        'unfold_header'  => 1,
+        'keep_header'    => 0,
+        'keep_fields'    => 1,
         'print_header'   => 0,
-        'print_body'     => 0,
         'print_preamble' => 0,
+        'print_body'     => 0,
         'print_epilogue' => 0,
+        @_,
     }, $cls;
     $self->init;
 }
 
-sub root { @_ > 1 ? $_[0]->{'root'} = $_[1] : $_[0]->{'root'} }
 sub keep_header { @_ > 1 ? $_[0]->{'keep_header'} = $_[1] : $_[0]->{'keep_header'} }
+sub keep_fields { @_ > 1 ? $_[0]->{'keep_fields'} = $_[1] : $_[0]->{'keep_fields'} }
 sub print { @_ > 1 ? $_[0]->{'print'} = $_[1] : $_[0]->{'print'} }
 sub print_header { @_ > 1 ? $_[0]->{'print_header'} = $_[1] : $_[0]->{'print_header'} }
 sub print_body { @_ > 1 ? $_[0]->{'print_body'} = $_[1] : $_[0]->{'print_body'} }
 sub print_preamble { @_ > 1 ? $_[0]->{'print_preamble'} = $_[1] : $_[0]->{'print_preamble'} }
 sub print_epilogue { @_ > 1 ? $_[0]->{'print_epilogue'} = $_[1] : $_[0]->{'print_epilogue'} }
-
-sub unfold_header {
-    if (@_ > 1) {
-        if ($_[0]->{'unfold_header'} = $_[1]) {
-            $_[0]->{'keep_header'} = 1;
-        }
-    }
-    $_[0]->{'unfold_header'};
-}
 
 sub init {
     my ($self) = @_;
@@ -57,7 +50,7 @@ sub init {
     if (!defined $print_spec) {
         $print = PRINT_NONE;
     }
-    elsif ($print_spec =~ /^[0-7]$/) {
+    elsif ($print_spec =~ /^\d+$/) {
         $print = $print_spec;
     }
     else {
@@ -90,41 +83,46 @@ sub init {
     $self;
 }
 
+# --- Parsing
+
 sub parse {
-    my ($self, $fh, $ofs, $line) = @_;
-    $ofs  = 0 unless defined $ofs;
-    $line = 0 unless defined $line;
-    # XXX Enable correct reading of mbox files? (?at least mboxrd, mboxcl, and mboxcl2)
-    my $start_ofs  = $ofs;
+    my ($self, $fh) = @_;
+    my ($ofs, $line) = (0, 1);
     my $root = $self->{'root'} = {
         'kind'   => 'message',
         'offset' => $ofs,
         'line'   => $line,
+        'number' => '1',
     };
+    my @entities;
     my @context = ($root);
     my @boundaries;
-    my $header = '';
 
     # --- Parsing options
-    my $unfold_header  = $self->unfold_header;
-    my $keep_header       = $self->keep_header;
-    my $print             = $self->print;
-    my $print_header      = $print & PRINT_HEADER;
-    my $print_body        = $print & PRINT_BODY;
-    my $print_preamble    = $print & PRINT_PREAMBLE;
-    my $print_epilogue    = $print & PRINT_EPILOGUE;
-
+    my $keep_header    = $self->keep_header;
+    my $keep_fields    = $self->keep_fields;
+    my $print          = $self->print;
+    my $print_header   = $print & PRINT_HEADER;
+    my $print_body     = $print & PRINT_BODY;
+    my $print_preamble = $print & PRINT_PREAMBLE;
+    my $print_epilogue = $print & PRINT_EPILOGUE;
+    
     my $state = IN_HEADER;
+    my $header = '';
     while (<$fh>) {
         my $len = length $_;
         $ofs += $len;
         $line++;
         if ($state == IN_HEADER) {
-            print if $print_header;
             if (/^$/) {
                 # --- Parse the header that has just ended
-                my $fields = $self->parse_header(\$header);
+                print $header, $_ if $print_header;
                 my $entity = $context[-1];
+                my $fields = $self->parse_header($header);
+                my $level = $entity->{'level'} = @context - 1;
+                if (@context > 1) {
+                    $entity->{'parent'} = $context[-2];
+                }
                 my ($content_type) = @{ $fields->{'content-type'} || [] };
                 if (!defined $content_type) {
                     if (@context >= 2) {
@@ -147,7 +145,7 @@ sub parse {
                 $entity->{'subtype'}     = $subtype;
                 $entity->{'type_params'} = $type_params;
                 $entity->{'header'}      = $header if $keep_header;
-                $entity->{'fields'}      = $fields;
+                $entity->{'fields'}      = $fields if $keep_fields;
                 $entity->{'body_offset'} = $ofs;
                 $header = '';
                 ($entity->{'encoding'})  = map lc, @{ $fields->{'content-transfer-encoding'} ||= ['7bit'] };
@@ -163,14 +161,18 @@ sub parse {
                     # --- Header is for a leaf entity
                     $state = IN_BODY;
                     pop @context;  # The entity whose header we just finished reading
+                    if ($level == 0 && !($print & PRINT_BODY)) {
+                        # Minor optimization: message is not multipart, so we
+                        # can stop if we're not going to be printing the body
+                        push @entities, $entity;
+                        while (<$fh>) { $ofs += length };
+                        last;
+                    }
                 }
+                push @entities, $entity;
             }
             else {
                 # --- Still in header
-                if (/^\s/) {
-                    # --- Second+ line of a folded header field
-                    chomp $header if $unfold_header;
-                }
                 $header .= $_;
             }
         }
@@ -189,10 +191,11 @@ sub parse {
                     'kind'   => 'part',
                     'offset' => $ofs,
                     'line'   => $line,
-                    'header' => $header,
                 };
                 my $parent = $context[-1];
                 push @{ $parent->{'parts'} }, $part;
+                $part->{'parent'} = $parent;
+                $part->{'number'} = $parent->{'number'} . '.' . scalar @{ $parent->{'parts'} };
                 push @context, $part;
             }
             $header = '';
@@ -210,17 +213,46 @@ sub parse {
             print if $print_body;
         }
     }
-    return $self;
+    $root->{'content_length'} = $ofs - $root->{'body_offset'};
+    $root->{'length'} = $ofs;
+    
+    return @entities;
 }
 
+# --- Reporting
+
+sub concise_structure {
+    my ($self, $message) = @_;
+    # (text/plain:0)
+    # (multipart/mixed:0 (text/plain:681) (image/gif:774))
+    my $visitor;
+    $visitor = sub {
+        my ($entity) = @_;
+        my $type = $entity->{'type'};
+        my $subtype = $entity->{'subtype'};
+        my $number = $entity->{'number'};
+        my $ofs  = $entity->{'offset'};
+        if ($type eq 'multipart') {
+            my $str = "($number $type/$subtype:$ofs";
+            $str .= ' ' . $visitor->($_) for @{ $entity->{'parts'} };
+            return $str . ')';
+        }
+        else {
+            return "($number $type/$subtype:$ofs)";
+        }
+    };
+    $visitor->($message);
+}
+
+# --- Utility functions
+
 sub parse_header {
-    my ($self, $hdrref) = @_;
-    my $str = $$hdrref;
-    $str =~ s/\n([ \t]+)/$1/g if $self->unfold_header;
+    my ($self, $str) = @_;
+    #my $str = $$hdrref;
+    $str =~ s/\n(?=[ \t])//g;
     my @fields;
     while ($str =~ /(.+)/g) {
-        my ($name, $value) = split /:\s+/, $1, 2;
-        push @fields, [$name, $value];
+        push @fields, [split /:\s+/, $1, 2];
     }
     return fields2hash(\@fields);
 }
@@ -250,7 +282,7 @@ sub parse_params {
         if ($str =~ /^"/) {
             my $value = extract_delimited($str, q{"}, '');
             $value =~ s/^"|"$//g;
-            $value =~ s/\\(.)|([^\\"]+)|(.)/$^N/g;
+            $value =~ s/\\(.)|([^\\"]+)|(.)/$+/g;
             $param{$name} = $value;
             # 
         }
@@ -263,38 +295,6 @@ sub parse_params {
         die "Bad params: $str" unless $str =~ s/^(\s*;\s*|\s*$)//;
     }
     return \%param;
-}
-
-# --- Reporting functions
-
-sub concise_structure {
-    my ($self) = @_;
-    # (text/plain:0)
-    # (multipart/mixed:0 (text/plain:681) (image/gif:774))
-    my $visitor;
-    $visitor = sub {
-        my ($entity) = @_;
-        my $type = $entity->{'type'};
-        my $subtype = $entity->{'subtype'};
-        my $ofs  = $entity->{'offset'};
-        if ($type eq 'multipart') {
-            my $str = "($type/$subtype:$ofs";
-            $str .= ' ' . $visitor->($_) for @{ $entity->{'parts'} };
-            return $str . ')';
-        }
-        else {
-            return "($type/$subtype:$ofs)";
-        }
-    };
-    $visitor->($self->root);
-}
-
-test() unless caller();
-
-sub test {
-    my $parser = __PACKAGE__->new('keep_header' => 0);
-    $parser->parse(\*STDIN);
-    print $parser->concise_structure, "\n";
 }
 
 
@@ -314,13 +314,13 @@ MIME::Structure - determine structure of MIME messages
     print $root->{'header'};
     $parts = $root->{'parts'};
     foreach ($parts) {
-        $offset_within_message = $_->{'offset'};
-        $type = $_->{'type'};
+        $offset  = $_->{'offset'};
+        $type    = $_->{'type'};
         $subtype = $_->{'subtype'};
-        $line = $_->{'line'};
-        $header = $_->{'header'};
+        $line    = $_->{'line'};
+        $header  = $_->{'header'};
     }
-    print $root->concise_structure, "\n";
+    print $parser->concise_structure($root), "\n";
 
 =cut
 
@@ -334,13 +334,22 @@ MIME::Structure - determine structure of MIME messages
 
 =item B<parse>
 
-    $root = $parser->parse;
-    $root = $parser->parse($cur_offset, $cur_line);
+    $root = $parser->parse($filehandle);
+    ($root, @other_entities) = $parser->parse($filehandle);
 
-=item B<root>
+Parses the message found in the given filehandle.
 
-    $parser->parse;
-    $root = $parser->root;
+A MIME message takes the form of a non-empty tree, each of whose nodes is
+termed an I<entity> (see RFCs 2045-2049).  The root entity is the message
+itself; the children of a multipart message are the parts it contains. (A
+non-multipart message has no children.)
+
+The B<parse> method returns a list of all the entities in the message; the
+first entity is the root entity, the second entity is the root's first child,
+and so on.  If called in scalar context, only the root is returned.
+
+Besides parsing the message, this method may also be used to print the message,
+or portions thereof, as it parses; see the B<print> method for details.
 
 =item B<keep_header>
 
@@ -349,12 +358,9 @@ MIME::Structure - determine structure of MIME messages
 
 Set (or get) whether headers should be remembered during parsing.
 
-=item B<unfold_header>
+=item B<keep_fields>
 
-    $unfold_header = $parser->unfold_header;
-    $parser->unfold_header(1);
-
-Set (or get) whether headers should be unfolded.
+Set (or get) whether fields (normalized headers) should be remembered.
 
 =item B<print>
 
@@ -422,6 +428,16 @@ Set (or get) whether preambles should be printed.
     $parser->print_epilogue(1);
 
 Set (or get) whether epilogues should be printed.
+
+=item B<entities>
+
+    $parser->parse;
+    print "$_->{type}/$_->{subtype} $_->{offset}\n"
+        for @{ $parser->entities };
+
+Returns a reference to an array of all the entities in a message, in the order
+in which they occur in the message.  Thus the first entity is always the root
+entity, i.e., the message itself).
 
 =item B<concise_structure>
 
