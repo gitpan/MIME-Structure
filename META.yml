@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               MIME-Structure
-version:            0.06
+version:            0.07
 abstract:           ~
 author:
     - Paul Hoffman <nkuitse AT cpan DOT org>

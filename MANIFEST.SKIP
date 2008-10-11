@@ -5,8 +5,8 @@ blib
 blibdirs
 pm_to_blib
 ^Makefile$
-^Makefile\.(old|bak)$
-^MANIFEST\.bak$
+\.old$
+\.bak$
 MIME-Structure-\d+
 ^\.podge
 ^_darcs

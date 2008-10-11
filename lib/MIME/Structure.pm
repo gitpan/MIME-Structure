@@ -4,7 +4,7 @@ use strict;
 
 use vars qw($VERSION);
 
-$VERSION = '0.06';
+$VERSION = '0.07';
 
 use Text::Balanced qw(extract_delimited);
 
@@ -88,24 +88,20 @@ sub init {
 sub parse {
     my ($self, $fh) = @_;
     my ($ofs, $line) = (0, 1);
-    my $root = $self->{'root'} = {
+    my $message = {
         'kind'   => 'message',
         'offset' => $ofs,
         'line'   => $line,
         'number' => '1',
     };
+    my @context = ($message);
     my @entities;
-    my @context = ($root);
     my @boundaries;
 
     # --- Parsing options
     my $keep_header    = $self->keep_header;
     my $keep_fields    = $self->keep_fields;
     my $print          = $self->print;
-    my $print_header   = $print & PRINT_HEADER;
-    my $print_body     = $print & PRINT_BODY;
-    my $print_preamble = $print & PRINT_PREAMBLE;
-    my $print_epilogue = $print & PRINT_EPILOGUE;
     
     my $state = IN_HEADER;
     my $header = '';
@@ -114,27 +110,25 @@ sub parse {
         $ofs += $len;
         $line++;
         if ($state == IN_HEADER) {
+            $header .= $_;
             if (/^$/) {
                 # --- Parse the header that has just ended
-                print $header, $_ if $print_header;
-                my $entity = $context[-1];
+                print $header if $print & PRINT_HEADER;
                 my $fields = $self->parse_header($header);
+                # @context is (..., $parent, $entity)
+                # or ($parent, $entity) if in header of a part of message
+                # or ($entity) if in message header itself
+                my $entity = $context[-1];
+                my $parent;
                 my $level = $entity->{'level'} = @context - 1;
                 if (@context > 1) {
-                    $entity->{'parent'} = $context[-2];
+                    # Current entity is $context[-1]
+                    $parent = $entity->{'parent'} = $context[-2];
                 }
                 my ($content_type) = @{ $fields->{'content-type'} || [] };
                 if (!defined $content_type) {
-                    if (@context >= 2) {
-                        my $parent = $context[-2];
-                        my $parent_type    = $parent->{'type'};
-                        my $parent_subtype = $parent->{'subtype'};
-                        if ("$parent_type/$parent_subtype" eq 'multipart/digest') {
-                            $content_type = 'message/rfc822';
-                        }
-                        else {
-                            $content_type = 'text/plain; charset=us-ascii';
-                        }
+                    if ($parent && "$parent->{'type'}/$parent->{'subtype'}" eq 'multipart/digest') {
+                        $content_type = 'message/rfc822'
                     }
                     else {
                         $content_type = 'text/plain; charset=us-ascii';
@@ -152,10 +146,12 @@ sub parse {
                 if ($type eq 'multipart') {
                     # --- Header is for a multipart entity
                     $state = IN_PREAMBLE;
-                    die "No boundary specified for multipart entity with head er at $ofs"
-                        unless defined $type_params->{'boundary'};
-                    push @boundaries, $type_params->{'boundary'};
+                    my $boundary = $type_params->{'boundary'};
+                    die "No boundary specified for multipart entity with header at $ofs"
+                        unless defined $boundary;
+                    push @boundaries, $boundary;
                     $entity->{'parts'} = [];
+                    $entity->{'parts_boundary'} = $boundary;
                 }
                 else {
                     # --- Header is for a leaf entity
@@ -170,10 +166,6 @@ sub parse {
                     }
                 }
                 push @entities, $entity;
-            }
-            else {
-                # --- Still in header
-                $header .= $_;
             }
         }
         elsif (@boundaries && /^--(.+?)(--)?$/ && $1 eq $boundaries[-1]) {
@@ -193,30 +185,34 @@ sub parse {
                     'line'   => $line,
                 };
                 my $parent = $context[-1];
-                push @{ $parent->{'parts'} }, $part;
+                my $parent_parts = $parent->{'parts'};
+                push @$parent_parts, $part;
                 $part->{'parent'} = $parent;
-                $part->{'number'} = $parent->{'number'} . '.' . scalar @{ $parent->{'parts'} };
+                $part->{'number'} = $parent->{'number'} . '.' . scalar @$parent_parts;
                 push @context, $part;
             }
-            $header = '';
         }
         elsif ($state == IN_PREAMBLE) {
             # A line within the preamble: ignore per RFC 2049
-            print if $print_preamble;
+            print if $print & PRINT_PREAMBLE;
         }
         elsif ($state == IN_EPILOGUE) {
             # A line within the epilogue: ignore per RFC 2049
-            print if $print_epilogue;
+            print if $print & PRINT_EPILOGUE;
         }
         else {
             # Normal body line
-            print if $print_body;
+            print if $print & PRINT_BODY;
         }
     }
-    $root->{'content_length'} = $ofs - $root->{'body_offset'};
-    $root->{'length'} = $ofs;
+    # We're all done reading
+    if (@context) {
+        die "Unfinished parts!";
+    }
+    $message->{'content_length'} = $ofs - $message->{'body_offset'};
+    $message->{'length'} = $ofs;
     
-    return @entities;
+    return wantarray ? @entities : $message;
 }
 
 # --- Reporting
@@ -310,9 +306,9 @@ MIME::Structure - determine structure of MIME messages
 
     use MIME::Structure;
     $parser = MIME::Structure->new;
-    $root = $parser->parse($filehandle);
-    print $root->{'header'};
-    $parts = $root->{'parts'};
+    $message = $parser->parse($filehandle);
+    print $message->{'header'};
+    $parts = $message->{'parts'};
     foreach ($parts) {
         $offset  = $_->{'offset'};
         $type    = $_->{'type'};
@@ -320,7 +316,7 @@ MIME::Structure - determine structure of MIME messages
         $line    = $_->{'line'};
         $header  = $_->{'header'};
     }
-    print $parser->concise_structure($root), "\n";
+    print $parser->concise_structure($message), "\n";
 
 =cut
 
@@ -334,8 +330,8 @@ MIME::Structure - determine structure of MIME messages
 
 =item B<parse>
 
-    $root = $parser->parse($filehandle);
-    ($root, @other_entities) = $parser->parse($filehandle);
+    $message = $parser->parse($filehandle);
+    ($message, @other_entities) = $parser->parse($filehandle);
 
 Parses the message found in the given filehandle.
 
@@ -344,12 +340,117 @@ termed an I<entity> (see RFCs 2045-2049).  The root entity is the message
 itself; the children of a multipart message are the parts it contains. (A
 non-multipart message has no children.)
 
-The B<parse> method returns a list of all the entities in the message; the
-first entity is the root entity, the second entity is the root's first child,
-and so on.  If called in scalar context, only the root is returned.
+When called in list context, the B<parse> method returns a list of references
+to hashes; each hash contains information about a single entity in the message.
+
+The first hash represents the message itself; if it is a multipart message,
+subsequent entities are its parts and subparts B<in the order in which they
+occur in the message> -- in other words, in pre-order.  If called in scalar
+context, only a reference to the hash containing information about the message
+itself is returned.
+
+The following elements may appear in these hashes:
+
+=over 4
+
+=item B<body_offset>
+
+The offset, in bytes, of the entity's body.
+
+=item B<content_length>
+
+The length, in bytes, of the entity's body.  Currently only set for the message
+itself.
+
+=item B<encoding>
+
+The value of the entity's Content-Transfer-Encoding field.
+
+=item B<fields>
+
+If the B<keep_fields> option is set, this will be a reference to a hash
+whose keys are the names (converted to lower case) are the names of all fields
+present in the entity;s header and whose values xxx.
+
+=item B<header>
+
+The entity's full header as it appeared in the message, not including the final
+blank line.  This will be presently only if the B<keep_header> option is set.
+
+=item B<kind>
+
+C<message> if the entity is the message, or C<part> if it is a part within a message
+(or within another part).
+
+=item B<length>
+
+The length, in bytes, of the entire entity, including its header and body. 
+Currently only set for the message itself.
+
+=item B<level>
+
+The level at which the entity is found.  The message itself is at level 0, its
+parts (if any) are at level 1, their parts are at level 2, and so on.
+
+=item B<line>
+
+The line number (1-based) of the first line of the message's header.  The message itself always, by definition,
+is at line 1.
+
+=item B<number>
+
+A dotted-decimal notation that indicates the entity's place within the message.
+The root entity (the message itself) has number 1; its parts (if it has any any)
+are numbered 1.1, 1.2, 1.3, etc., and the numbers of their parts in turn (if
+they have any) are constructed in like manner.
+
+=item B<offset>
+
+The offset B<in bytes> of the first line of the entity's header, measured from
+the first line of the message's header.  The message itself always, by definition,
+is at offset 0.
+
+=item B<parent>
+
+A reference to the hash representing the entity's parent.  If the entity is
+the message itself, this is undefined.
+
+=item B<parts>
+
+A reference to an array of the entity's parts.  This will be present only if
+the entity is of type B<multipart>.
+
+=item B<parts_boundary>
+
+The string used as a boundary to delimit the entity's parts.  Present only in
+multipart entities.
+
+=item B<subtype>
+
+The MIME media subtype of the entity's content, e.g., C<plain> or C<jpeg>.
+
+=item B<type>
+
+The MIME media type of the entity's content, e.g., C<text> or C<image>.
+
+=item B<type_params>
+
+A reference to a hash containing the attributes (if any) found in the
+Content-Type: header field.  For example, given the following Content-Type header:
+
+    Content-Type: text/html; charset=UTF-8
+
+The entity's B<type_params> element will be this:
+
+    $entity{'type_params'} = {
+        'charset' => 'UTF-8',
+    }
+
+=back
 
 Besides parsing the message, this method may also be used to print the message,
-or portions thereof, as it parses; see the B<print> method for details.
+or portions thereof, as it parses; the B<print> method (q.v.) may be used to
+specify what to print.
 
 =item B<keep_header>
 

@@ -21,3 +21,11 @@ changes:
   - new() was ignoring args passed to it
   - Removed header unfolding, which was messing up offsets
   - Print epilogue if desired
+
+---
+version: 0.07
+date:    2008-10-10
+changes:
+  - parse() now returns message entity when called in scalar context
+  - documented structure of data returned by parse()
+  - added lots of tests
